@@ -12,6 +12,7 @@
         "synonym": {
           "tokenizer": "whitespace",
           "filter": [
+            "lowercase",
             "stemmer",
             "synonym"
           ]
