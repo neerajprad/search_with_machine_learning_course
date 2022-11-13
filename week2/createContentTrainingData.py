@@ -1,4 +1,6 @@
 import argparse
+from collections import Counter
+import functools
 import multiprocessing
 import glob
 from tqdm import tqdm
@@ -37,10 +39,11 @@ names_as_labels = False
 if args.label == 'name':
     names_as_labels = True
 
-def _label_filename(filename):
+
+def _label_counts(filename):
     tree = ET.parse(filename)
     root = tree.getroot()
-    labels = []
+    categoory_counts = Counter()
     for child in root:
         # Check to make sure category name is valid and not in music or movies
         if (child.find('name') is not None and child.find('name').text is not None and
@@ -54,15 +57,41 @@ def _label_filename(filename):
               else:
                   cat = child.find('categoryPath')[len(child.find('categoryPath')) - 1][0].text
               # Replace newline chars with spaces so fastText doesn't complain
-              name = child.find('name').text.replace('\n', ' ')
-              labels.append((cat, transform_name(name)))
+              categoory_counts[cat] += 1
+    return categoory_counts
+
+
+def _label_filename(category_counts, filename):
+    tree = ET.parse(filename)
+    root = tree.getroot()
+    labels = []
+    for child in root:
+        # Check to make sure category name is valid and not in music or movies
+        if (child.find('name') is not None and child.find('name').text is not None and
+            child.find('categoryPath') is not None and len(child.find('categoryPath')) > 0 and
+            child.find('categoryPath')[len(child.find('categoryPath')) - 1][0].text is not None and
+            child.find('categoryPath')[0][0].text == 'cat00000' and
+            child.find('categoryPath')[1][0].text != 'abcat0600000'):
+                # Choose last element in categoryPath as the leaf categoryId or name
+                if names_as_labels:
+                    cat = child.find('categoryPath')[len(child.find('categoryPath')) - 1][1].text.replace(' ', '_')
+                else:
+                    cat = child.find('categoryPath')[len(child.find('categoryPath')) - 1][0].text
+                if category_counts[cat] < min_products:
+                    continue
+                # Replace newline chars with spaces so fastText doesn't complain              
+                name = child.find('name').text.replace('\n', ' ')
+                labels.append((cat, transform_name(name)))
     return labels
+
 
 if __name__ == '__main__':
     files = glob.glob(f'{directory}/*.xml')
     print("Writing results to %s" % output_file)
     with multiprocessing.Pool() as p:
-        all_labels = tqdm(p.imap(_label_filename, files), total=len(files))
+        category_counts = p.map(_label_counts, files)
+        category_counts = functools.reduce(lambda a, b: a + b, category_counts)
+        all_labels = tqdm(p.imap(functools.partial(_label_filename, category_counts), files), total=len(files))
         with open(output_file, 'w') as output:
             for label_list in all_labels:
                 for (cat, name) in label_list:
