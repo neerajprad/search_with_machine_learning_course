@@ -56,7 +56,7 @@ def create_prior_queries(doc_ids, doc_id_weights,
 # Hardcoded query here.  Better to use search templates or other query config.
 def create_query(user_query, click_prior_query, filters, sort="_score", sortDir="desc", size=10, source=None, categories=(), use_synonyms=False):
     filters = [] if filters is None else []
-    if not args.boost_queries:
+    if args.filter_categories:
         filters.append({
             "terms": {
                 "categoryPathIds.keyword": categories
@@ -111,7 +111,7 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
             }
         }
     ]
-    if args.boost_queries:
+    if args.boost_categories:
         should_clauses.append({
             "terms": {
                 "categoryPathIds.keyword": categories,
@@ -251,9 +251,12 @@ if __name__ == "__main__":
     general.add_argument('--synonyms',
                          action='store_true',
                          help='Whether to use the synonyms field for search.')
-    general.add_argument("--boost_queries", 
+    general.add_argument("--filter_categories", 
                          action="store_true", 
-                         help="Whether to use inferred query categories for boosting (true)/filtering (false)")                         
+                         help="Whether to use inferred query categories for filtering.")                                
+    general.add_argument("--boost_categories", 
+                         action="store_true", 
+                         help="Whether to use inferred query categories for boosting.")
 
     args = parser.parse_args()
 
