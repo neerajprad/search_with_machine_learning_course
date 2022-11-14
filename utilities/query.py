@@ -5,6 +5,9 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import argparse
 import json
+import fasttext
+import nltk
+import re
 import os
 from getpass import getpass
 from urllib.parse import urljoin
@@ -16,6 +19,8 @@ import sys
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logging.basicConfig(format='%(levelname)s:%(message)s')
+
+model = fasttext.load_model("/workspace/datasets/fasttext/queries_cls.bin")
 
 # expects clicks and impressions to be in the row
 def create_prior_queries_from_group(
@@ -49,7 +54,70 @@ def create_prior_queries(doc_ids, doc_id_weights,
 
 
 # Hardcoded query here.  Better to use search templates or other query config.
-def create_query(user_query, click_prior_query, filters, sort="_score", sortDir="desc", size=10, source=None, use_synonyms=False):
+def create_query(user_query, click_prior_query, filters, sort="_score", sortDir="desc", size=10, source=None, categories=(), use_synonyms=False):
+    filters = [] if filters is None else []
+    if not args.boost_queries:
+        filters.append({
+            "terms": {
+                "categoryPathIds.keyword": categories
+            }
+        })
+    should_clauses = [
+        {
+            "match": {
+                "name": {
+                    "query": user_query,
+                    "fuzziness": "1",
+                    "prefix_length": 2,
+                    # short words are often acronyms or usually not misspelled, so don't edit
+                    "boost": 0.01
+                }
+            }
+        },
+        {
+            "match_phrase": {  # near exact phrase match
+                "name.hyphens": {
+                    "query": user_query,
+                    "slop": 1,
+                    "boost": 50
+                }
+            }
+        },
+        {
+            "multi_match": {
+                "query": user_query,
+                "type": "phrase",
+                "slop": "6",
+                "minimum_should_match": "2<75%",
+                "fields": ["name.synonyms^10" if use_synonyms else "name^10", "name.hyphens^10", "shortDescription^5",
+                            "longDescription^5", "department^0.5", "sku", "manufacturer", "features",
+                            "categoryPath"]
+            }
+        },
+        {
+            "terms": {
+                # Lots of SKUs in the query logs, boost by it, split on whitespace so we get a list
+                "sku": user_query.split(),
+                "boost": 50.0
+            }
+        },
+        {  # lots of products have hyphens in them or other weird casing things like iPad
+            "match": {
+                "name.hyphens": {
+                    "query": user_query,
+                    "operator": "OR",
+                    "minimum_should_match": "2<75%"
+                }
+            }
+        }
+    ]
+    if args.boost_queries:
+        should_clauses.append({
+            "terms": {
+                "categoryPathIds.keyword": categories,
+                "boost": 50
+            }
+        })
     query_obj = {
         'size': size,
         "sort": [
@@ -62,55 +130,7 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
                         "must": [
 
                         ],
-                        "should": [  #
-                            {
-                                "match": {
-                                    "name": {
-                                        "query": user_query,
-                                        "fuzziness": "1",
-                                        "prefix_length": 2,
-                                        # short words are often acronyms or usually not misspelled, so don't edit
-                                        "boost": 0.01
-                                    }
-                                }
-                            },
-                            {
-                                "match_phrase": {  # near exact phrase match
-                                    "name.hyphens": {
-                                        "query": user_query,
-                                        "slop": 1,
-                                        "boost": 50
-                                    }
-                                }
-                            },
-                            {
-                                "multi_match": {
-                                    "query": user_query,
-                                    "type": "phrase",
-                                    "slop": "6",
-                                    "minimum_should_match": "2<75%",
-                                    "fields": ["name.synonyms^10" if use_synonyms else "name^10", "name.hyphens^10", "shortDescription^5",
-                                               "longDescription^5", "department^0.5", "sku", "manufacturer", "features",
-                                               "categoryPath"]
-                                }
-                            },
-                            {
-                                "terms": {
-                                    # Lots of SKUs in the query logs, boost by it, split on whitespace so we get a list
-                                    "sku": user_query.split(),
-                                    "boost": 50.0
-                                }
-                            },
-                            {  # lots of products have hyphens in them or other weird casing things like iPad
-                                "match": {
-                                    "name.hyphens": {
-                                        "query": user_query,
-                                        "operator": "OR",
-                                        "minimum_should_match": "2<75%"
-                                    }
-                                }
-                            }
-                        ],
+                        "should": should_clauses,
                         "minimum_should_match": 1,
                         "filter": filters  #
                     }
@@ -187,11 +207,26 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
     return query_obj
 
 
+def stemmed_query(query):
+    query = re.sub("\W+", " ", query)
+    stemmer = nltk.PorterStemmer()
+    return " ".join([stemmer.stem(w) for w in query.split()])
+
+
+def get_categories(query):
+    normalized_query = stemmed_query(query)
+    categories, probs = model.predict(query, k=5)
+    threshold = 0.3
+    categories = [c.replace("__label__", "") for c in categories]
+    return [c for i, c in enumerate(categories) if probs[i] >= threshold]
+
+
 def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", use_synonyms=False):
     #### W3: classify the query
     #### W3: create filters and boosts
     # Note: you may also want to modify the `create_query` method above
-    query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], use_synonyms=use_synonyms)
+    categories = get_categories(user_query)
+    query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], categories=categories, use_synonyms=use_synonyms)
     logging.info(query_obj)
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
@@ -216,6 +251,9 @@ if __name__ == "__main__":
     general.add_argument('--synonyms',
                          action='store_true',
                          help='Whether to use the synonyms field for search.')
+    general.add_argument("--boost_queries", 
+                         action="store_true", 
+                         help="Whether to use inferred query categories for boosting (true)/filtering (false)")                         
 
     args = parser.parse_args()
 
