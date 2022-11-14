@@ -218,7 +218,9 @@ def get_categories(query):
     categories, probs = model.predict(query, k=5)
     threshold = 0.3
     categories = [c.replace("__label__", "") for c in categories]
-    return [c for i, c in enumerate(categories) if probs[i] >= threshold]
+    categories_filtered = [c for i, c in enumerate(categories) if probs[i] >= threshold]
+    print("Inferred categories:", categories_filtered)
+    return categories_filtered
 
 
 def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", use_synonyms=False):
