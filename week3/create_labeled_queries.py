@@ -3,6 +3,7 @@ import argparse
 import xml.etree.ElementTree as ET
 import pandas as pd
 import numpy as np
+import re
 import csv
 
 # Useful if you want to perform stemming.
@@ -25,6 +26,13 @@ output_file_name = args.output
 if args.min_queries:
     min_queries = int(args.min_queries)
 
+
+def stemmed_query(query):
+    query = re.sub("\W+", " ", query)
+    stemmer = nltk.PorterStemmer()
+    return " ".join([stemmer.stem(w) for w in query.split()])
+
+
 # The root category, named Best Buy with id cat00000, doesn't have a parent.
 root_category_id = 'cat00000'
 
@@ -34,6 +42,7 @@ root = tree.getroot()
 # Parse the category XML file to map each category id to its parent category id in a dataframe.
 categories = []
 parents = []
+depth = []
 for child in root:
     id = child.find('id').text
     cat_path = child.find('path')
@@ -42,7 +51,8 @@ for child in root:
     if leaf_id != root_category_id:
         categories.append(leaf_id)
         parents.append(cat_path_ids[-2])
-parents_df = pd.DataFrame(list(zip(categories, parents)), columns =['category', 'parent'])
+        depth.append(len(cat_path_ids))
+parents_df = pd.DataFrame(list(zip(categories, parents, depth)), columns =['category', 'parent', 'depth'])
 
 # Read the training data into pandas, only keeping queries with non-root categories in our category tree.
 queries_df = pd.read_csv(queries_file_name)[['category', 'query']]
@@ -50,12 +60,27 @@ queries_df = queries_df[queries_df['category'].isin(categories)]
 
 # IMPLEMENT ME: Convert queries to lowercase, and optionally implement other normalization, like stemming.
 
+queries_df['query'] = queries_df['query'].apply(stemmed_query)
+
 # IMPLEMENT ME: Roll up categories to ancestors to satisfy the minimum number of queries per category.
+
+def fetch_parent(category):
+    parent = list(parents_df[parents_df.category == category]['parent'])
+    return parent[0] if len(parent) > 0 else category
+
+queries_df_grouped = queries_df.groupby('category')['category'].count().reset_index(name="count")
+
+
+depth = parents_df["depth"].max()
+while (queries_df_grouped['count'] < min_queries).any() and depth >= 1:
+    categories_rollup = set(queries_df_grouped['category'][queries_df_grouped['count'] < min_queries]).intersection(set(parents_df['category'][parents_df.depth == depth]))
+    queries_df['category'] = queries_df['category'].apply(lambda x: x if x not in categories_rollup else fetch_parent(x))
+    queries_df_grouped = queries_df.groupby('category')['category'].count().reset_index(name="count")
+    print(f"Rollup at depth {depth}, number of categories {len(queries_df_grouped)}")
+    depth = depth - 1
 
 # Create labels in fastText format.
 queries_df['label'] = '__label__' + queries_df['category']
-
 # Output labeled query data as a space-separated file, making sure that every category is in the taxonomy.
-queries_df = queries_df[queries_df['category'].isin(categories)]
 queries_df['output'] = queries_df['label'] + ' ' + queries_df['query']
 queries_df[['output']].to_csv(output_file_name, header=False, sep='|', escapechar='\\', quoting=csv.QUOTE_NONE, index=False)
